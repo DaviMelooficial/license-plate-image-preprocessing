@@ -81,27 +81,47 @@ def diagnose(metrics):
     return flags
 
 
-def auto_gamma_correction(img_bgr):
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    v = hsv[:, :, 2]
-    mean_norm = np.clip(v.mean() / 255.0, 1e-3, 1 - 1e-3)
-    gamma = np.log(0.5) / np.log(mean_norm)
-    lut = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)], dtype=np.uint8)
-    hsv[:, :, 2] = cv2.LUT(v, lut)
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+def linear_brightness_correction(img_bgr, target_mean=115.0):
+    """Correcao de exposicao por deslocamento aditivo: g(x,y) = f(x,y) + beta.
+    E uma transformacao afim de ganho unitario, aplicada apenas ao canal de
+    luminancia (Y) em YCrCb - conversao BGR<->YCrCb e ela mesma linear/afim
+    (matriz fixa 3x3 + offset constante, sem raizes ou ramificacoes), diferente
+    de HSV/Lab. Mexer so em Y e nao nos canais de crominancia (Cr, Cb) evita
+    amplificar de forma independente qualquer ruido residual por canal.
+    Substitui a correcao gamma (nao-linear, g = f**(1/gamma)) para respeitar a
+    restricao de filtros lineares."""
+    ycrcb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    y = ycrcb[:, :, 0]
+    beta = target_mean - float(y.mean())
+    ycrcb[:, :, 0] = np.clip(y + beta, 0, 255)
+    return cv2.cvtColor(ycrcb.astype(np.uint8), cv2.COLOR_YCrCb2BGR)
 
 
-def apply_clahe(img_bgr, clip_limit=2.0, tile_grid_size=(8, 8)):
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
-    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+def linear_contrast_stretch(img_bgr, low_pct=2, high_pct=98, max_gain=4.0):
+    """Alargamento de contraste linear (afim): g = (f - lo) * ganho, onde lo/hi
+    sao os percentis low_pct/high_pct da luminancia (Y, em YCrCb) e o ganho e
+    limitado por max_gain. So o canal Y e alterado - Cr/Cb ficam intactos -
+    porque esticar B, G e R de forma independente com um ganho grande amplifica
+    qualquer diferenca residual entre canais (ruido/compressao JPEG) em manchas
+    coloridas (posterizacao em cores), nao em mais contraste real. Limitar o
+    ganho evita essa mesma explosao quando a regiao e quase uniforme (hi - lo
+    pequeno). Substitui o CLAHE (equalizacao adaptativa de histograma,
+    nao-linear)."""
+    ycrcb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    y = ycrcb[:, :, 0]
+    lo, hi = np.percentile(y, [low_pct, high_pct])
+    if hi - lo < 1e-3:
+        return img_bgr
+    scale = min(255.0 / (hi - lo), max_gain)
+    ycrcb[:, :, 0] = np.clip((y - lo) * scale, 0, 255)
+    return cv2.cvtColor(ycrcb.astype(np.uint8), cv2.COLOR_YCrCb2BGR)
 
 
-def denoise_nlmeans(img_bgr):
-    return cv2.fastNlMeansDenoisingColored(
-        img_bgr, None, h=10, hColor=10, templateWindowSize=7, searchWindowSize=21
-    )
+def denoise_gaussian(img_bgr, ksize=5, sigma=0):
+    """Filtro Gaussiano: convolucao linear com um nucleo Gaussiano 2D.
+    Substitui o Non-local Means (nao-linear, baseado em comparacao de patches)
+    para respeitar a restricao de filtros lineares."""
+    return cv2.GaussianBlur(img_bgr, (ksize, ksize), sigma)
 
 
 def unsharp_mask(img_bgr, sigma=3, amount=1.5):
@@ -122,13 +142,13 @@ def process_image(img_bgr, bbox=None):
     corrections = []
 
     if flags["ruidosa"]:
-        processed = denoise_nlmeans(processed)
+        processed = denoise_gaussian(processed)
         corrections.append("ruidosa")
     if flags["baixa_luz"] or flags["estourada"]:
-        processed = auto_gamma_correction(processed)
+        processed = linear_brightness_correction(processed)
         corrections.append("baixa_luz" if flags["baixa_luz"] else "estourada")
     if flags["baixo_contraste"]:
-        processed = apply_clahe(processed)
+        processed = linear_contrast_stretch(processed)
         corrections.append("baixo_contraste")
     if flags["desfocada"]:
         processed = unsharp_mask(processed)

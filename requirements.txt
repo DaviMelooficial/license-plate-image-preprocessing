@@ -98,6 +98,7 @@ scipy==1.18.1
 six==1.17.0
 soupsieve==2.9.2
 stack-data==0.6.3
+streamlit==1.63.0
 terminado==0.18.1
 tifffile==2026.8.23
 tinycss2==1.5.1

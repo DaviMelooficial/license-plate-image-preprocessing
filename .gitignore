@@ -4,3 +4,8 @@ __pycache__/
 .ipynb_checkpoints/
 .omc/
 .DS_Store
+
+# Artefatos gerados pelo pipeline (recriados ao rodar o notebook / process_folder) -
+# so o dataset original em images/ deve ficar versionado.
+images_processed/
+*.zip
