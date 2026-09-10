@@ -4,3 +4,5 @@ __pycache__/
 .ipynb_checkpoints/
 .omc/
 .DS_Store
+images_processed/
+images_processed_global/
