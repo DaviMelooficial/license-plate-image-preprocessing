@@ -29,41 +29,30 @@ Medida no recorte da placa, entrada vs. saída, em dois eixos: ganho de contrast
 
 ## Diagrama de Blocos da Pipeline
 
-Cada imagem passa pelo mesmo diagrama (ver notebook, seção 2.1, com os parâmetros de cada bloco):
-
-```mermaid
-flowchart TD
-    A([Imagem de entrada BGR]) --> B[Cinza<br/>combinação linear fixa dos canais]
-    B --> C[Suavização gaussiana<br/>convolução linear]
-    C --> D[Normalização afim<br/>T(r) = a·r + b]
-    D --> E[Unsharp mask<br/>combinação linear com blur gaussiano]
-    E --> F([Saída em cinza, mesma resolução])
-
-    subgraph P["Pipeline A — global"]
-        direction LR
-        PA1[estatísticas da afim: cena inteira]
-        PA2[parâmetros fixos p/ as 100 imagens]
-    end
-
-    subgraph Q["Pipeline B — adaptativo"]
-        direction LR
-        QA1[estatísticas da afim: recorte da placa]
-        QA2[unsharp mask só se diagnóstico = desfocada]
-    end
-
-    classDef io fill:#4a6fa522,stroke:#4a6fa5,stroke-width:1.5px
-    classDef linear fill:#3b8f6b22,stroke:#3b8f6b,stroke-width:1.5px
-    class A,F io
-    class B,C,D,E linear
-```
+Ver **[DIAGRAMA_BLOCOS.md](DIAGRAMA_BLOCOS.md)** — em arquivo separado porque o Mermaid embutido
+direto neste README quebrava a renderização no GitHub. O mesmo diagrama (com os parâmetros
+numéricos resolvidos de cada bloco) também aparece como imagem dentro do notebook, seção 2.1.
 
 ## Ambiente
+
+macOS/Linux:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Windows (PowerShell):
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Se o PowerShell bloquear a ativação por política de execução, rode antes (só vale para aquela
+janela de terminal): `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
 
 ## Como rodar
 
