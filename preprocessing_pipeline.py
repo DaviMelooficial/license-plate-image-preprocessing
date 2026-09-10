@@ -44,6 +44,29 @@ def _clamp_bbox(x1, y1, x2, y2, w, h):
     return x1, y1, x2, y2
 
 
+def crop_with_margin(img_bgr, bbox, margin_ratio=0.2):
+    """Recorta a regiao do bbox (x1, y1, x2, y2) com uma margem proporcional ao
+    seu tamanho (margin_ratio=0 recorta so a placa; >0 da algum contexto ao
+    redor). Usado para inspecionar visualmente so a regiao da placa em vez da
+    cena inteira."""
+    h, w = img_bgr.shape[:2]
+    x1, y1, x2, y2 = bbox
+    mx = int((x2 - x1) * margin_ratio)
+    my = int((y2 - y1) * margin_ratio)
+    x1, y1, x2, y2 = _clamp_bbox(x1 - mx, y1 - my, x2 + mx, y2 + my, w, h)
+    return img_bgr[y1:y2, x1:x2]
+
+
+def scale_bbox_for_upscale(bbox, corrections_applied, scale=1.5):
+    """Reescala o bbox quando a correcao 'placa_pequena' (upscale) foi aplicada,
+    para que o recorte/metrica de 'depois' aponte para a mesma regiao fisica
+    na imagem já redimensionada."""
+    if bbox is None or "placa_pequena" not in corrections_applied:
+        return bbox
+    x1, y1, x2, y2 = bbox
+    return (int(x1 * scale), int(y1 * scale), int(x2 * scale), int(y2 * scale))
+
+
 def compute_metrics(img_bgr, bbox=None):
     h, w = img_bgr.shape[:2]
     plate_area_ratio = None
@@ -160,13 +183,6 @@ def process_image(img_bgr, bbox=None):
     return processed, corrections, flags, metrics
 
 
-def _scale_bbox_for_upscale(bbox, corrections_applied, scale=1.5):
-    if bbox is None or "placa_pequena" not in corrections_applied:
-        return bbox
-    x1, y1, x2, y2 = bbox
-    return (int(x1 * scale), int(y1 * scale), int(x2 * scale), int(y2 * scale))
-
-
 def process_folder(images_dir, output_dir, db_path):
     images_dir = Path(images_dir)
     output_dir = Path(output_dir)
@@ -185,7 +201,7 @@ def process_folder(images_dir, output_dir, db_path):
         out_path = output_dir / path.name
         cv2.imwrite(str(out_path), processed)
 
-        after_bbox = _scale_bbox_for_upscale(bbox, corrections)
+        after_bbox = scale_bbox_for_upscale(bbox, corrections)
         after_metrics = compute_metrics(processed, bbox=after_bbox)
 
         record = {

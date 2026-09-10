@@ -105,6 +105,11 @@ if not auto_mode:
 else:
     manual_flags = None
 
+st.sidebar.divider()
+st.sidebar.subheader("Recorte da placa")
+show_crop = st.sidebar.toggle("Mostrar recorte da placa", value=True)
+crop_margin = st.sidebar.slider("Margem ao redor da placa (%)", 0, 100, 20, step=5) / 100.0
+
 
 def run_pipeline(img_bgr, bbox=None):
     """Roda o diagnostico + as correcoes lineares com os parametros da sidebar."""
@@ -134,16 +139,35 @@ def run_pipeline(img_bgr, bbox=None):
         processed = pp.upscale_lanczos(processed, scale=upscale_factor)
         corrections.append("placa_pequena")
 
-    after_bbox = bbox
-    if bbox is not None and "placa_pequena" in corrections:
-        x1, y1, x2, y2 = bbox
-        after_bbox = (
-            int(x1 * upscale_factor), int(y1 * upscale_factor),
-            int(x2 * upscale_factor), int(y2 * upscale_factor),
-        )
+    after_bbox = pp.scale_bbox_for_upscale(bbox, corrections, scale=upscale_factor)
     after_metrics = pp.compute_metrics(processed, bbox=after_bbox)
 
-    return processed, corrections, flags, before_metrics, after_metrics
+    return processed, corrections, flags, before_metrics, after_metrics, after_bbox
+
+
+def show_plate_crop(original_bgr, processed_bgr, bbox, after_bbox, margin_ratio):
+    """Mostra o recorte da regiao da placa (antes/depois), reaproveitando o
+    bbox embutido no nome CCPD - o mesmo usado internamente para medir as
+    metricas so na placa."""
+    st.subheader(f"Recorte da placa (margem de {int(margin_ratio * 100)}%)")
+    if bbox is None:
+        st.info(
+            "Recorte indisponivel: esta imagem nao segue a convencao de nome CCPD "
+            "(sem bounding box embutido no nome do arquivo). Funciona para as imagens "
+            "do dataset em `images/`."
+        )
+        return
+    crop_col1, crop_col2 = st.columns(2)
+    with crop_col1:
+        st.image(
+            rgb_of(pp.crop_with_margin(original_bgr, bbox, margin_ratio=margin_ratio)),
+            caption="original - recorte", width="stretch",
+        )
+    with crop_col2:
+        st.image(
+            rgb_of(pp.crop_with_margin(processed_bgr, after_bbox, margin_ratio=margin_ratio)),
+            caption="processada - recorte", width="stretch",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +196,7 @@ if page == "Imagem unica":
         bbox = None
 
     img_bgr = bgr_of(rgb_img)
-    processed_bgr, corrections, flags, before_m, after_m = run_pipeline(img_bgr, bbox=bbox)
+    processed_bgr, corrections, flags, before_m, after_m, after_bbox = run_pipeline(img_bgr, bbox=bbox)
     processed_rgb = rgb_of(processed_bgr)
 
     col1, col2 = st.columns(2)
@@ -183,6 +207,10 @@ if page == "Imagem unica":
         title = "Depois: " + (", ".join(FLAG_LABELS.get(c, c) for c in corrections) if corrections else "sem correcao (boa qualidade)")
         st.subheader(title)
         st.image(processed_rgb, width="stretch")
+
+    if show_crop:
+        st.divider()
+        show_plate_crop(img_bgr, processed_bgr, bbox, after_bbox, crop_margin)
 
     st.divider()
     st.subheader("Diagnostico")
@@ -277,11 +305,20 @@ else:
 
     if choice:
         rec = filtered[filtered["original_filename"] == choice].iloc[0]
+        original_bgr = cv2.imread(rec["original_path"])
+        processed_bgr_lote = cv2.imread(rec["processed_path"])
+
         col1, col2 = st.columns(2)
         with col1:
-            st.image(rgb_of(cv2.imread(rec["original_path"])), caption="original", width="stretch")
+            st.image(rgb_of(original_bgr), caption="original", width="stretch")
         with col2:
-            st.image(rgb_of(cv2.imread(rec["processed_path"])), caption=f"processada ({rec['corrections_applied'] or 'sem correcao'})", width="stretch")
+            st.image(rgb_of(processed_bgr_lote), caption=f"processada ({rec['corrections_applied'] or 'sem correcao'})", width="stretch")
+
+        if show_crop:
+            corrections_lote = rec["corrections_applied"].split(",") if rec["corrections_applied"] else []
+            bbox_lote = pp.parse_ccpd_bbox(Path(choice).stem)
+            after_bbox_lote = pp.scale_bbox_for_upscale(bbox_lote, corrections_lote)
+            show_plate_crop(original_bgr, processed_bgr_lote, bbox_lote, after_bbox_lote, crop_margin)
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
