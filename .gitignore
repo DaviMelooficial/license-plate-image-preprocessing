@@ -5,7 +5,7 @@ __pycache__/
 .omc/
 .DS_Store
 
-# Artefatos gerados pelo pipeline (recriados ao rodar o notebook / process_folder) -
-# so o dataset original em images/ deve ficar versionado.
+# Saidas intermediarias do pipeline (recriadas ao rodar o notebook) -
+# so o dataset original em images/ e o .zip final de entrega ficam versionados.
 images_processed/
-*.zip
+images_processed_global/

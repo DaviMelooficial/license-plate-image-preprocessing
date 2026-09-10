@@ -1,49 +1,60 @@
-# License Plate Image Preprocessing
+# License Plate Image Preprocessing — Prática 1 (Visão Computacional)
 
-Pipeline de pré-processamento de imagens de placas veiculares (dataset no formato CCPD), usando **apenas filtros lineares**, com o objetivo de melhorar a qualidade de cada imagem de acordo com o problema específico que ela apresenta (baixa luz, superexposição, baixo contraste, desfoque, ruído ou placa pequena na cena), em vez de aplicar uma transformação genérica igual para todas.
+Pipeline de pré-processamento de imagens de placas veiculares (dataset no formato CCPD) construído **somente com filtros lineares** — convoluções (gaussiana, unsharp mask) e a transformação de intensidade afim `T(r) = a·r + b` — conforme a política da prática. Nenhuma operação não-linear (mediana, bilateral, non-local means, equalização/CLAHE, gamma, limiarização) é aplicada às imagens; a linearidade da cadeia é verificada numericamente no notebook.
 
 **Equipe:** Ivan Edward, Elizabete Barbosa, Davi Melo
 
-## Estrutura
+## Entregáveis
 
-- `vc_pratica1_grupo1.ipynb` — notebook único e entregável da prática: EDA das 100 imagens (parsing dos metadados CCPD, métricas objetivas de qualidade, categorização por problema dominante), comparação quantitativa de técnicas candidatas restritas a filtros lineares, diagrama de blocos da pipeline, execução do pipeline sobre as 100 imagens e a métrica de avaliação proposta com a análise dos resultados.
-- `preprocessing_pipeline.py` — módulo com as funções de diagnóstico (`compute_metrics`, `diagnose`) e de correção — todas lineares: `linear_brightness_correction` (deslocamento aditivo do canal de luminância em YCrCb), `linear_contrast_stretch` (alargamento afim por percentis, também em YCrCb, com ganho limitado), `denoise_gaussian` (convolução Gaussiana), `unsharp_mask` (combinação linear com blur Gaussiano) e `upscale_lanczos` (interpolação linear) — mais os orquestradores `process_image` (uma imagem) e `process_folder` (lote completo).
-- `images/` — dataset original (100 imagens).
-- `images_processed/` — gerado ao rodar o pipeline (não versionado): imagens processadas + `mapping.db` (SQLite) com a relação imagem original ↔ processada, diagnóstico e métricas antes/depois.
-- `images_processed_grupo1.zip` — gerado sob demanda para a entrega (não versionado): as 100 imagens processadas compactadas.
-- `app.py` — interface Streamlit para explorar a pipeline interativamente (uma imagem por vez, com sliders para os parâmetros, ou o lote completo com métricas agregadas).
-- `Pratica1_VC.pdf` — enunciado da prática.
+| Arquivo | Conteúdo |
+|---|---|
+| `vc_pratica1_grupo1.ipynb` | Notebook com células executadas: análise inicial, implementação (diagrama de blocos, métrica, calibração) e análise dos resultados. Nomes dos integrantes na primeira célula. |
+| `vc_pratica1_grupo1_imagens.zip` | 100 imagens filtradas pelo Pipeline B (adaptativo), mesmos nomes das originais. Gerado pela última seção do notebook. |
+| `preprocessing_pipeline.py` | Blocos lineares, os dois pipelines, métrica de avaliação e processamento em lote (importado pelo notebook e pelo `app.py`). |
+| `app.py` | Interface Streamlit para explorar os dois pipelines interativamente — uma imagem por vez (com sliders para os parâmetros) ou o lote completo com métricas agregadas. |
+| `images/` | Dataset original (100 imagens CCPD, 720×1160). |
+
+## Os dois pipelines
+
+Mesmos quatro blocos lineares (`to_gray → gaussian_smooth → affine_intensity → unsharp_mask`), em `run_linear_pipeline`:
+
+- **Pipeline A — global:** parâmetros fixos para as 100 imagens, sem usar a anotação da placa; estatísticas da afim lidas da cena inteira. Responde à pergunta do enunciado ("um pipeline serve a todas?").
+- **Pipeline B — adaptativo:** estatísticas da afim lidas do recorte da placa (bbox do nome do arquivo); unsharp mask só liga quando o diagnóstico indica desfoque. O diagnóstico escolhe apenas escalares — nenhum bloco não-linear entra.
+
+Resultado (métrica proposta, ver abaixo): **Pipeline A ≈ 61% de sucesso, Pipeline B ≈ 88%** — a resposta é "não, um pipeline global não serve igual a todas", e o ganho do B vem quase todo de onde as estatísticas da normalização são lidas (placa vs. cena inteira), não da escolha dos filtros em si. Detalhes e limitações da análise na seção 3.4 do notebook.
+
+## Métrica proposta — Índice de Legibilidade Linear (ILL)
+
+Medida no recorte da placa, entrada vs. saída, em dois eixos: ganho de contraste RMS e retenção de nitidez relativa `ρ = σ(∇²I)/σ(I)` (invariante a transformações afins — evita confundir reescalonamento de intensidade com nitidez real), com custos de artefato (fração saturada < 5 %, brilho da placa em [40, 215]). `ILL = log2(ganho_contraste) + log2(min(retenção, 1))`; uma imagem é "sucesso" se cumpre as quatro condições. Definida antes da calibração; limitações discutidas na seção 3.4 do notebook.
 
 ## Diagrama de Blocos da Pipeline
 
-Cada imagem passa pelo diagnóstico (limiares calibrados a partir da distribuição das 100 imagens,
-ver Metodologia) e recebe **somente** as correções lineares indicadas pelas suas próprias métricas
-— nunca um bloco único aplicado ao dataset inteiro.
+Cada imagem passa pelo mesmo diagrama (ver notebook, seção 2.1, com os parâmetros de cada bloco):
 
 ```mermaid
 flowchart TD
-    A([Imagem de entrada]) --> B[Diagnóstico: métricas objetivas + limiares]
-    B --> C{Ruidosa?}
-    C -- sim --> C1[Denoise Gaussiano<br/>filtro linear]
-    C -- não --> D{Baixa luz ou<br/>estourada?}
-    C1 --> D
-    D -- sim --> D1[Correção linear de brilho<br/>afim, canal Y]
-    D -- não --> E{Baixo contraste?}
-    D1 --> E
-    E -- sim --> E1[Alargamento linear de contraste<br/>afim, canal Y]
-    E -- não --> F{Desfocada?}
-    E1 --> F
-    F -- sim --> F1[Unsharp Mask<br/>combinação linear]
-    F -- não --> G{Placa pequena<br/>na cena?}
-    F1 --> G
-    G -- sim --> G1[Upscale Lanczos<br/>interpolação linear]
-    G -- não --> H([Imagem processada +<br/>registro em mapping.db])
-    G1 --> H
+    A([Imagem de entrada BGR]) --> B[Cinza<br/>combinação linear fixa dos canais]
+    B --> C[Suavização gaussiana<br/>convolução linear]
+    C --> D[Normalização afim<br/>T(r) = a·r + b]
+    D --> E[Unsharp mask<br/>combinação linear com blur gaussiano]
+    E --> F([Saída em cinza, mesma resolução])
+
+    subgraph P["Pipeline A — global"]
+        direction LR
+        PA1[estatísticas da afim: cena inteira]
+        PA2[parâmetros fixos p/ as 100 imagens]
+    end
+
+    subgraph Q["Pipeline B — adaptativo"]
+        direction LR
+        QA1[estatísticas da afim: recorte da placa]
+        QA2[unsharp mask só se diagnóstico = desfocada]
+    end
 
     classDef io fill:#4a6fa522,stroke:#4a6fa5,stroke-width:1.5px
     classDef linear fill:#3b8f6b22,stroke:#3b8f6b,stroke-width:1.5px
-    class A,B,H io
-    class C1,D1,E1,F1,G1 linear
+    class A,F io
+    class B,C,D,E linear
 ```
 
 ## Ambiente
@@ -56,16 +67,10 @@ pip install -r requirements.txt
 
 ## Como rodar
 
-Notebook (gera `images_processed/` e `mapping.db`):
+Notebook (recria `images_processed/` — Pipeline B —, `images_processed_global/` — Pipeline A — e o `.zip`; ~3 min; as duas pastas são saídas intermediárias e não são versionadas):
 
 ```bash
 jupyter nbconvert --to notebook --execute --inplace vc_pratica1_grupo1.ipynb
-```
-
-Para atualizar o `.zip` de entrega depois de rodar o notebook:
-
-```bash
-python -c "import zipfile; from pathlib import Path; zf = zipfile.ZipFile('images_processed_grupo1.zip', 'w', zipfile.ZIP_DEFLATED); [zf.write(f, arcname=f.name) for f in sorted(Path('images_processed').glob('*.jpg'))]"
 ```
 
 Interface interativa (Streamlit) — abre no navegador em `http://localhost:8501`:
@@ -74,10 +79,4 @@ Interface interativa (Streamlit) — abre no navegador em `http://localhost:8501
 streamlit run app.py
 ```
 
-A aba "Imagem única" deixa escolher uma imagem do dataset (ou enviar uma nova), ajustar os parâmetros de cada filtro linear pela barra lateral e ver diagnóstico, antes/depois e métricas em tempo real. A aba "Lote (100 imagens)" mostra a distribuição de correções, a taxa de sucesso da métrica proposta e permite navegar pelas 100 imagens já processadas (requer ter rodado o notebook antes, para existir `images_processed/mapping.db`).
-
-## Metodologia
-
-Os limiares de diagnóstico (`BRIGHTNESS_LOW`, `BRIGHTNESS_HIGH`, `CONTRAST_LOW`, `SHARPNESS_LOW`, `NOISE_HIGH`, `PLATE_AREA_LOW`) foram calibrados a partir da distribuição real das 100 imagens (média ± 0,5 desvio-padrão de cada métrica), documentados no notebook e congelados como constantes em `preprocessing_pipeline.py` para permitir avaliar uma imagem isolada sem depender do lote inteiro.
-
-Cada imagem pode disparar mais de uma correção — elas são aplicadas em cadeia, na ordem: denoise (Gaussiano) → correção de exposição (deslocamento linear de brilho) → contraste (alargamento linear) → nitidez (unsharp mask) → upscale (Lanczos). Todas as operações são filtros lineares (convolução ou transformação afim ponto a ponto); nenhuma correção usa gamma, CLAHE, non-local means, bilateral, mediana ou IA generativa. Todas as correções são validadas com métricas objetivas de antes/depois, não apenas inspeção visual — ver a métrica de avaliação proposta no notebook (Parte 3).
+A aba "Imagem única" deixa escolher uma imagem do dataset (ou enviar uma nova), rodar o Pipeline A, o B, ou ajustar manualmente os parâmetros dos blocos lineares pela barra lateral, com diagnóstico, antes/depois e métricas (incluindo o ILL) em tempo real. A aba "Lote (100 imagens)" mostra a distribuição de diagnósticos, a taxa de sucesso de cada pipeline e permite navegar pelas 100 imagens já processadas (requer ter rodado o notebook antes, para existirem os `mapping.db` de cada pipeline).

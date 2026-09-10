@@ -1,12 +1,14 @@
 """
 Interface Streamlit para o pipeline de pre-processamento (apenas filtros lineares)
-de imagens de placas veiculares.
+de imagens de placas veiculares - Pipeline A (global) e Pipeline B (adaptativo),
+ambos definidos em preprocessing_pipeline.py.
 
 Rodar com:
     streamlit run app.py
 """
 
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -17,8 +19,8 @@ import streamlit as st
 import preprocessing_pipeline as pp
 
 IMAGES_DIR = Path("images")
-OUTPUT_DIR = Path("images_processed")
-DB_PATH = OUTPUT_DIR / "mapping.db"
+OUT_GLOBAL = Path("images_processed_global")   # saida do Pipeline A
+OUT_ADAPTIVE = Path("images_processed")        # saida do Pipeline B (entregavel principal)
 
 st.set_page_config(page_title="Pipeline de Placas - Filtros Lineares", layout="wide")
 
@@ -32,27 +34,39 @@ def list_images():
 
 
 @st.cache_data
-def load_image(name):
-    img = cv2.imread(str(IMAGES_DIR / name))
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+def load_image_bgr(name):
+    return cv2.imread(str(IMAGES_DIR / name))
 
 
 @st.cache_data
-def load_mapping_df():
-    if not DB_PATH.exists():
+def load_mapping_df(pipeline):
+    db_path = (OUT_GLOBAL if pipeline == "global" else OUT_ADAPTIVE) / "mapping.db"
+    if not db_path.exists():
         return None
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     df = pd.read_sql("SELECT * FROM image_mapping", conn)
     conn.close()
     return df
 
 
-def bgr_of(rgb_img):
-    return cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-
-
 def rgb_of(bgr_img):
     return cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
+
+def show_image(container, img, caption):
+    """st.image aceita array 2D (cinza) ou 3D (cor); cor precisa ir BGR->RGB antes."""
+    to_show = rgb_of(img) if img.ndim == 3 else img
+    container.image(to_show, caption=caption, width="stretch")
+
+
+def crop_with_margin(img, bbox, margin_ratio=0.2):
+    """Recorta a regiao do bbox com uma margem proporcional - funciona tanto em
+    imagens coloridas (BGR) quanto em cinza, ja que so faz slicing espacial."""
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = bbox
+    mx, my = int((x2 - x1) * margin_ratio), int((y2 - y1) * margin_ratio)
+    x1, y1, x2, y2 = pp._clamp_bbox(x1 - mx, y1 - my, x2 + mx, y2 + my, w, h)
+    return img[y1:y2, x1:x2]
 
 
 def metric_delta(label, before, after, fmt="{:.2f}", better="higher"):
@@ -76,6 +90,8 @@ FLAG_LABELS = {
     "placa_pequena": "Placa pequena na cena",
 }
 
+PIPELINE_LABELS = {"global": "Pipeline A - global", "adaptive": "Pipeline B - adaptativo"}
+
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -85,25 +101,23 @@ st.sidebar.caption("Apenas filtros lineares - Pratica 1 de Visao Computacional")
 page = st.sidebar.radio("Secao", ["Imagem unica", "Lote (100 imagens)"])
 
 st.sidebar.divider()
-st.sidebar.subheader("Parametros da pipeline")
-auto_mode = st.sidebar.toggle("Modo automatico (diagnostico decide)", value=True)
+st.sidebar.subheader("Modo de processamento")
+mode = st.sidebar.radio(
+    "Escolha o pipeline",
+    ["global", "adaptive", "custom"],
+    format_func=lambda m: {"global": "Pipeline A (global, fixo)",
+                            "adaptive": "Pipeline B (adaptativo, por diagnostico)",
+                            "custom": "Customizado (ajustar manualmente)"}[m],
+)
 
-target_mean = st.sidebar.slider("Brilho alvo", 60, 180, 115, step=5)
-low_pct, high_pct = st.sidebar.slider("Percentis do alargamento de contraste", 0, 100, (2, 98))
-max_gain = st.sidebar.slider("Ganho maximo do contraste", 1.0, 10.0, 4.0, step=0.5)
-denoise_ksize = st.sidebar.select_slider("Kernel do denoise Gaussiano", options=[3, 5, 7, 9], value=5)
-unsharp_sigma = st.sidebar.slider("Sigma do unsharp mask", 0.5, 6.0, 3.0, step=0.5)
-unsharp_amount = st.sidebar.slider("Intensidade do unsharp mask", 0.0, 3.0, 1.5, step=0.1)
-upscale_factor = st.sidebar.slider("Fator de upscale (Lanczos)", 1.0, 3.0, 1.5, step=0.1)
-
-if not auto_mode:
-    st.sidebar.caption("Selecione manualmente as correcoes a aplicar:")
-    manual_flags = {
-        flag: st.sidebar.checkbox(label, value=False)
-        for flag, label in FLAG_LABELS.items()
-    }
-else:
-    manual_flags = None
+if mode == "custom":
+    st.sidebar.caption("Blocos lineares: cinza -> gaussiana -> afim -> unsharp mask")
+    smooth_sigma = st.sidebar.slider("Sigma da suavizacao gaussiana (0 = desligada)", 0.0, 5.0, 0.0, step=0.25)
+    target_mean = st.sidebar.slider("Media alvo da normalizacao afim", 0.0, 255.0, 127.0, step=1.0)
+    target_std = st.sidebar.slider("Desvio padrao alvo da normalizacao afim", 1.0, 100.0, 60.0, step=1.0)
+    sharpen_sigma = st.sidebar.slider("Sigma do unsharp mask", 0.0, 5.0, 2.5, step=0.25)
+    sharpen_amount = st.sidebar.slider("Intensidade do unsharp mask (0 = desligado)", 0.0, 3.0, 1.0, step=0.1)
+    use_plate_stats = st.sidebar.toggle("Ler media/desvio da normalizacao no recorte da placa", value=True)
 
 st.sidebar.divider()
 st.sidebar.subheader("Recorte da placa")
@@ -111,44 +125,34 @@ show_crop = st.sidebar.toggle("Mostrar recorte da placa", value=True)
 crop_margin = st.sidebar.slider("Margem ao redor da placa (%)", 0, 100, 20, step=5) / 100.0
 
 
-def run_pipeline(img_bgr, bbox=None):
-    """Roda o diagnostico + as correcoes lineares com os parametros da sidebar."""
-    before_metrics = pp.compute_metrics(img_bgr, bbox=bbox)
-    flags = pp.diagnose(before_metrics) if auto_mode else dict(manual_flags)
-    if not auto_mode:
-        flags.setdefault("placa_pequena", False)
+def run_single(img_bgr, bbox):
+    """Roda o modo escolhido na sidebar sobre uma imagem e devolve tudo que a
+    UI precisa: saida, parametros efetivos, metricas antes/depois, diagnostico
+    e a avaliacao pela metrica proposta (ILL)."""
+    before = pp.compute_metrics(img_bgr, bbox=bbox)
+    flags = pp.diagnose(before)
 
-    processed = img_bgr
-    corrections = []
-
-    if flags.get("ruidosa"):
-        processed = pp.denoise_gaussian(processed, ksize=denoise_ksize)
-        corrections.append("ruidosa")
-    if flags.get("baixa_luz") or flags.get("estourada"):
-        processed = pp.linear_brightness_correction(processed, target_mean=target_mean)
-        corrections.append("baixa_luz" if flags.get("baixa_luz") else "estourada")
-    if flags.get("baixo_contraste"):
-        processed = pp.linear_contrast_stretch(
-            processed, low_pct=low_pct, high_pct=high_pct, max_gain=max_gain
+    if mode == "global":
+        out, params, (a, b) = pp.pipeline_global(img_bgr, bbox=bbox)
+    elif mode == "adaptive":
+        out, params, (a, b) = pp.pipeline_adaptive(img_bgr, bbox=bbox)
+    else:
+        params_obj = pp.PipelineParams(
+            smooth_sigma=smooth_sigma, target_mean=target_mean, target_std=target_std,
+            sharpen_sigma=sharpen_sigma, sharpen_amount=sharpen_amount,
         )
-        corrections.append("baixo_contraste")
-    if flags.get("desfocada"):
-        processed = pp.unsharp_mask(processed, sigma=unsharp_sigma, amount=unsharp_amount)
-        corrections.append("desfocada")
-    if flags.get("placa_pequena"):
-        processed = pp.upscale_lanczos(processed, scale=upscale_factor)
-        corrections.append("placa_pequena")
+        stats_bbox = bbox if (use_plate_stats and bbox is not None) else None
+        out, (a, b) = pp.run_linear_pipeline(img_bgr, params_obj, stats_bbox=stats_bbox)
+        params = asdict(params_obj)
 
-    after_bbox = pp.scale_bbox_for_upscale(bbox, corrections, scale=upscale_factor)
-    after_metrics = pp.compute_metrics(processed, bbox=after_bbox)
-
-    return processed, corrections, flags, before_metrics, after_metrics, after_bbox
+    after = pp.compute_metrics(out, bbox=bbox)
+    evaluation = pp.evaluate_pair(before, after)
+    return out, params, (a, b), before, after, flags, evaluation
 
 
-def show_plate_crop(original_bgr, processed_bgr, bbox, after_bbox, margin_ratio):
-    """Mostra o recorte da regiao da placa (antes/depois), reaproveitando o
-    bbox embutido no nome CCPD - o mesmo usado internamente para medir as
-    metricas so na placa."""
+def show_plate_crop(original, processed, bbox, margin_ratio):
+    """Recorte da regiao da placa (antes/depois) - os blocos lineares nao mudam
+    a resolucao, entao o bbox e o mesmo antes e depois."""
     st.subheader(f"Recorte da placa (margem de {int(margin_ratio * 100)}%)")
     if bbox is None:
         st.info(
@@ -157,17 +161,17 @@ def show_plate_crop(original_bgr, processed_bgr, bbox, after_bbox, margin_ratio)
             "do dataset em `images/`."
         )
         return
-    crop_col1, crop_col2 = st.columns(2)
-    with crop_col1:
-        st.image(
-            rgb_of(pp.crop_with_margin(original_bgr, bbox, margin_ratio=margin_ratio)),
-            caption="original - recorte", width="stretch",
-        )
-    with crop_col2:
-        st.image(
-            rgb_of(pp.crop_with_margin(processed_bgr, after_bbox, margin_ratio=margin_ratio)),
-            caption="processada - recorte", width="stretch",
-        )
+    c1, c2 = st.columns(2)
+    show_image(c1, crop_with_margin(original, bbox, margin_ratio), "original - recorte")
+    show_image(c2, crop_with_margin(processed, bbox, margin_ratio), "processada - recorte")
+
+
+def show_evaluation(evaluation):
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Ganho de contraste", f"{evaluation['contrast_gain']:.2f}x")
+    e2.metric("Retencao de nitidez", f"{evaluation['sharpness_retention']:.2f}x")
+    e3.metric("Fracao saturada (depois)", f"{evaluation['clipped_fraction_after']:.1%}")
+    e4.metric("ILL", f"{evaluation['ill']:.2f}", delta="sucesso" if evaluation["success"] else "nao atingiu o alvo")
 
 
 # ---------------------------------------------------------------------------
@@ -177,13 +181,11 @@ if page == "Imagem unica":
     st.title("Pre-processamento de uma imagem")
 
     images = list_images()
-    col_src1, col_src2 = st.columns([2, 1])
-    with col_src1:
-        source = st.radio("Origem da imagem", ["Dataset (images/)", "Enviar arquivo"], horizontal=True)
+    source = st.radio("Origem da imagem", ["Dataset (images/)", "Enviar arquivo"], horizontal=True)
 
     if source == "Dataset (images/)":
         filename = st.selectbox("Escolha uma imagem", images)
-        rgb_img = load_image(filename)
+        img_bgr = load_image_bgr(filename)
         bbox = pp.parse_ccpd_bbox(Path(filename).stem)
     else:
         uploaded = st.file_uploader("Envie uma imagem .jpg/.png", type=["jpg", "jpeg", "png"])
@@ -191,57 +193,56 @@ if page == "Imagem unica":
             st.info("Envie uma imagem para continuar, ou volte para o dataset.")
             st.stop()
         file_bytes = np.frombuffer(uploaded.read(), np.uint8)
-        bgr_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        rgb_img = rgb_of(bgr_img)
+        img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         bbox = None
 
-    img_bgr = bgr_of(rgb_img)
-    processed_bgr, corrections, flags, before_m, after_m, after_bbox = run_pipeline(img_bgr, bbox=bbox)
-    processed_rgb = rgb_of(processed_bgr)
+    processed, params, (a, b), before_m, after_m, flags, evaluation = run_single(img_bgr, bbox)
 
     col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Antes")
-        st.image(rgb_img, width="stretch")
-    with col2:
-        title = "Depois: " + (", ".join(FLAG_LABELS.get(c, c) for c in corrections) if corrections else "sem correcao (boa qualidade)")
-        st.subheader(title)
-        st.image(processed_rgb, width="stretch")
+    show_image(col1, img_bgr, "Antes (colorida)")
+    show_image(col2, processed, f"Depois ({PIPELINE_LABELS.get(mode, 'customizado')}, cinza)")
 
     if show_crop:
         st.divider()
-        show_plate_crop(img_bgr, processed_bgr, bbox, after_bbox, crop_margin)
+        show_plate_crop(img_bgr, processed, bbox, crop_margin)
 
     st.divider()
     st.subheader("Diagnostico")
     flag_cols = st.columns(len(FLAG_LABELS))
     for col, (flag, label) in zip(flag_cols, FLAG_LABELS.items()):
-        active = bool(flags.get(flag))
-        col.metric(label, "SIM" if active else "nao", delta=None)
+        col.metric(label, "SIM" if flags.get(flag) else "nao")
 
-    st.subheader("Metricas objetivas (antes -> depois)")
+    st.subheader("Parametros efetivos (bloco afim resolvido em a, b)")
+    st.json({**params, "affine_a": round(a, 4), "affine_b": round(b, 4)})
+
+    st.subheader("Metricas objetivas (antes -> depois, na regiao da placa)")
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         metric_delta("Brilho medio", before_m["brightness_mean"], after_m["brightness_mean"], better="higher" if flags.get("baixa_luz") else "lower")
     with m2:
         metric_delta("Contraste (desvio padrao)", before_m["contrast_std"], after_m["contrast_std"], better="higher")
     with m3:
-        metric_delta("Nitidez (var. Laplaciano)", before_m["sharpness_laplacian_var"], after_m["sharpness_laplacian_var"], better="higher", fmt="{:.1f}")
+        metric_delta("Nitidez relativa", before_m["relative_sharpness"], after_m["relative_sharpness"], better="higher", fmt="{:.3f}")
     with m4:
         metric_delta("Ruido estimado", before_m["noise_estimate"], after_m["noise_estimate"], better="lower", fmt="{:.4f}")
+
+    st.subheader("Metrica proposta - Indice de Legibilidade Linear (ILL)")
+    show_evaluation(evaluation)
 
     with st.expander("Quais filtros lineares foram usados e por que"):
         st.markdown(
             """
-- **Denoise** (`ruidosa`): convolucao com kernel Gaussiano - filtro linear.
-- **Brilho** (`baixa_luz` / `estourada`): deslocamento aditivo `g = f + beta` no canal de
-  luminancia (Y, espaco YCrCb) - transformacao afim.
-- **Contraste** (`baixo_contraste`): alargamento afim por percentis `g = (f - lo) * ganho`,
-  tambem so no canal Y, com ganho limitado para nao amplificar ruido de quantizacao.
-- **Nitidez** (`desfocada`): unsharp mask - combinacao linear de imagem + blur Gaussiano.
-- **Upscale** (`placa_pequena`): interpolacao de Lanczos - filtro linear.
+- **Cinza**: combinacao linear fixa dos canais BGR (0.114 B + 0.587 G + 0.299 R).
+- **Suavizacao** (opcional, `smooth_sigma`): convolucao com kernel Gaussiano.
+- **Normalizacao de intensidade**: transformacao afim `T(r) = a*r + b` (reta), com
+  `a, b` escolhidos para levar a media/desvio da regiao de referencia (cena inteira no
+  Pipeline A, recorte da placa no Pipeline B) para o alvo `target_mean`/`target_std`.
+- **Nitidez** (`sharpen_amount`): unsharp mask - combinacao linear com blur Gaussiano.
 
-Nenhuma correcao usa gamma, CLAHE, non-local means, bilateral, mediana ou IA generativa.
+A cadeia inteira (suavizacao + afim + unsharp) e uma unica composicao de operacoes
+lineares - `preprocessing_pipeline.check_linearity()` prova isso numericamente
+(testa `T(a*f + b*g) == a*T(f) + b*T(g)`). Nenhuma correcao usa gamma, CLAHE,
+non-local means, bilateral, mediana ou IA generativa.
             """
         )
 
@@ -251,47 +252,29 @@ Nenhuma correcao usa gamma, CLAHE, non-local means, bilateral, mediana ou IA gen
 else:
     st.title("Visao geral do lote (100 imagens)")
 
-    df = load_mapping_df()
+    lote_pipeline = st.radio(
+        "Pipeline", ["adaptive", "global"], format_func=lambda p: PIPELINE_LABELS[p], horizontal=True,
+    )
+    df = load_mapping_df(lote_pipeline)
     if df is None:
         st.warning(
-            "Nenhum `images_processed/mapping.db` encontrado. Rode o notebook "
-            "`vc_pratica1_grupo1.ipynb` (ou `preprocessing_pipeline.process_folder`) primeiro."
+            f"Nenhum `{(OUT_GLOBAL if lote_pipeline == 'global' else OUT_ADAPTIVE)}/mapping.db` encontrado. "
+            "Rode o notebook `vc_pratica1_grupo1.ipynb` (ou `preprocessing_pipeline.process_folder`) primeiro."
         )
         st.stop()
 
-    n_corrections = df["corrections_applied"].apply(lambda s: 0 if s == "" else len(s.split(",")))
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Imagens processadas", len(df))
-    c2.metric("Sem nenhuma correcao", int((n_corrections == 0).sum()))
-    c3.metric("Media de correcoes/imagem", f"{n_corrections.mean():.2f}")
-    c4.metric("Maximo de correcoes numa imagem", int(n_corrections.max()))
+    c2.metric("Taxa de sucesso (ILL)", f"{df['success'].mean():.0%}")
+    c3.metric("ILL medio", f"{df['ill'].mean():.2f}")
+    c4.metric("Fracao saturada media", f"{df['clipped_fraction_after'].mean():.1%}")
 
-    st.subheader("Distribuicao de correcoes aplicadas")
-    st.bar_chart(n_corrections.value_counts().sort_index())
+    st.subheader("Diagnosticos disparados (multi-rotulo)")
+    flag_counts = pd.Series({FLAG_LABELS[f]: int(df[f"flag_{f}"].sum()) for f in FLAG_LABELS})
+    st.bar_chart(flag_counts)
 
-    st.subheader("Taxa de sucesso da metrica proposta, por tipo de correcao")
-    checks = {
-        "baixa_luz": ("brightness_mean", lambda b, a: a > b),
-        "estourada": ("brightness_mean", lambda b, a: a < b),
-        "baixo_contraste": ("contrast_std", lambda b, a: a > b),
-        "desfocada": ("sharpness_laplacian_var", lambda b, a: a > b),
-        "ruidosa": ("noise_estimate", lambda b, a: a < b),
-    }
-    rows = []
-    for flag, (metric, better) in checks.items():
-        applied = df[df[f"flag_{flag}"] == 1]
-        if applied.empty:
-            continue
-        success = better(applied[f"{metric}_before"], applied[f"{metric}_after"])
-        rows.append({
-            "correcao": FLAG_LABELS[flag],
-            "n_imagens": len(applied),
-            "taxa_sucesso": success.mean(),
-        })
-    eval_df = pd.DataFrame(rows).set_index("correcao")
-    st.bar_chart(eval_df["taxa_sucesso"])
-    st.dataframe(eval_df.style.format({"taxa_sucesso": "{:.0%}"}), width="stretch")
+    st.subheader("Distribuicao do ILL")
+    st.bar_chart(df["ill"].round(1).value_counts().sort_index())
 
     st.divider()
     st.subheader("Explorar imagens do lote")
@@ -301,24 +284,20 @@ else:
         filtered = filtered[filtered[f"flag_{flag}"] == 1]
 
     st.caption(f"{len(filtered)} imagem(ns) apos o filtro")
-    choice = st.selectbox("Imagem", filtered["original_filename"].tolist()) if len(filtered) else None
+    choice = st.selectbox("Imagem", filtered["filename"].tolist()) if len(filtered) else None
 
     if choice:
-        rec = filtered[filtered["original_filename"] == choice].iloc[0]
-        original_bgr = cv2.imread(rec["original_path"])
-        processed_bgr_lote = cv2.imread(rec["processed_path"])
+        rec = filtered[filtered["filename"] == choice].iloc[0]
+        original_bgr = load_image_bgr(rec["filename"])
+        processed_gray = cv2.imread(rec["processed_path"], cv2.IMREAD_GRAYSCALE)
 
         col1, col2 = st.columns(2)
-        with col1:
-            st.image(rgb_of(original_bgr), caption="original", width="stretch")
-        with col2:
-            st.image(rgb_of(processed_bgr_lote), caption=f"processada ({rec['corrections_applied'] or 'sem correcao'})", width="stretch")
+        show_image(col1, original_bgr, "original")
+        show_image(col2, processed_gray, "processada" + (" - sucesso" if rec["success"] else " - nao atingiu o alvo"))
 
         if show_crop:
-            corrections_lote = rec["corrections_applied"].split(",") if rec["corrections_applied"] else []
             bbox_lote = pp.parse_ccpd_bbox(Path(choice).stem)
-            after_bbox_lote = pp.scale_bbox_for_upscale(bbox_lote, corrections_lote)
-            show_plate_crop(original_bgr, processed_bgr_lote, bbox_lote, after_bbox_lote, crop_margin)
+            show_plate_crop(original_bgr, processed_gray, bbox_lote, crop_margin)
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
@@ -326,9 +305,14 @@ else:
         with m2:
             metric_delta("Contraste", rec["contrast_std_before"], rec["contrast_std_after"])
         with m3:
-            metric_delta("Nitidez", rec["sharpness_laplacian_var_before"], rec["sharpness_laplacian_var_after"], fmt="{:.1f}")
+            metric_delta("Nitidez relativa", rec["relative_sharpness_before"], rec["relative_sharpness_after"], fmt="{:.3f}")
         with m4:
             metric_delta("Ruido", rec["noise_estimate_before"], rec["noise_estimate_after"], better="lower", fmt="{:.4f}")
+
+        st.markdown(
+            f"**ILL:** {rec['ill']:.2f} &nbsp;|&nbsp; **ganho de contraste:** {rec['contrast_gain']:.2f}x "
+            f"&nbsp;|&nbsp; **retencao de nitidez:** {rec['sharpness_retention']:.2f}x"
+        )
 
     st.divider()
     st.subheader("Tabela completa (mapping.db)")
